@@ -1,0 +1,12 @@
+"""Central user-facing product names."""
+
+APP_NAME = "月星BAS工具箱"
+APP_SHORT_NAME = "月星BAS"
+APP_CAPTION = "工具箱"
+PERMISSION_MODULE_NAME = "权限管理"
+PERMISSION_MODULE_DESCRIPTION = "TCC 权限诊断、授权与恢复"
+SYSTEM_MODULE_NAME = "系统维护"
+UPDATE_BADGE_PAGE_NAME = "更新提示"
+EFI_PAGE_NAME = "EFI 分区"
+DEVELOPER_NAME = "谢清宇@谢清宇工作室"
+STUDIO_NAME = "谢清宇工作室"
