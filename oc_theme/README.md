@@ -4,6 +4,21 @@
 
 ## 安装
 
+### 图形界面
+
+1. 在“系统维护 → EFI 分区”挂载 EFI；
+2. 打开“系统维护 → OC 主题”；
+3. 选择检测到的 `/Volumes/.../EFI/OC`，或手动选择目录；
+4. 点击“应用主题”并确认。
+
+应用失败时工具会自动回滚。主题备份保存在：
+
+```text
+~/Library/Application Support/TCCPermissionAssistant/Backups/OpenCore/
+```
+
+### 命令行
+
 EFI 分区挂载后执行：
 
 ```bash
@@ -33,7 +48,10 @@ oc_theme/OpenCanopy.efi
 
 ## 恢复
 
-最近一次备份路径会在安装脚本输出中显示。恢复时：
+“OC 主题”页会列出工具管理的主题备份。选择备份后点击“还原所选备份”即可。
+还原前会再保存当前状态，便于再次撤销。
+
+也可以手动恢复：
 
 1. 将备份目录内的 `config.plist` 复制回 `EFI/OC/config.plist`；
 2. 将备份的 `Label` 目录复制回 `EFI/OC/Resources/Label`；
