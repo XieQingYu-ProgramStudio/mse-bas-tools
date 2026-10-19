@@ -24,6 +24,7 @@ from tcc_permission_assistant.branding import (
     APP_SHORT_NAME,
     DEVELOPER_NAME,
     EFI_PAGE_NAME,
+    OC_THEME_PAGE_NAME,
     PERMISSION_MODULE_DESCRIPTION,
     PERMISSION_MODULE_NAME,
     SYSTEM_MODULE_NAME,
@@ -49,6 +50,7 @@ from tcc_permission_assistant.gui.dynamic_permissions_page import (
 from tcc_permission_assistant.gui.efi_page import EFIPage
 from tcc_permission_assistant.gui.icons import load_icon
 from tcc_permission_assistant.gui.log_page import LogPage
+from tcc_permission_assistant.gui.opencore_theme_page import OpenCoreThemePage
 from tcc_permission_assistant.gui.restore_page import RestorePage
 from tcc_permission_assistant.gui.scan_page import ScanPage
 from tcc_permission_assistant.gui.settings_page import SettingsPage
@@ -67,6 +69,7 @@ PERMISSION_NAVIGATION_ITEMS = (
 SYSTEM_NAVIGATION_ITEMS = (
     (UPDATE_BADGE_PAGE_NAME, "bell-dot"),
     (EFI_PAGE_NAME, "hard-drive"),
+    (OC_THEME_PAGE_NAME, "monitor"),
 )
 
 
@@ -115,6 +118,7 @@ class MainWindow(QMainWindow):
         self.log_page = LogPage(audit)
         self.update_badge_page = UpdateBadgePage(audit, self.badge_manager)
         self.efi_page = EFIPage(audit)
+        self.theme_page = OpenCoreThemePage(audit)
         self.settings_page = SettingsPage(self.settings, audit)
         self._build_ui()
         self._build_menu()
@@ -331,6 +335,7 @@ class MainWindow(QMainWindow):
             self.log_page,
             self.update_badge_page,
             self.efi_page,
+            self.theme_page,
             self.settings_page,
         ):
             self.stack.addWidget(page)
@@ -365,6 +370,7 @@ class MainWindow(QMainWindow):
         self.scan_page.scan_completed.connect(self.dynamic_page.set_scan_result)
         self.scan_page.open_dynamic_permissions_requested.connect(lambda: self.go_to(2))
         self.dynamic_page.environment_changed.connect(self._refresh_environment_status)
+        self.theme_page.open_efi_page_requested.connect(lambda: self.go_to(7))
         self.restore_page.environment_changed.connect(self._refresh_environment_status)
         self.diagnostics_page.environment_updated.connect(self._apply_diagnostic_status)
         self.settings_page.application_name_language_changed.connect(
