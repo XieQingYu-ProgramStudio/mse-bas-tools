@@ -1,0 +1,9 @@
+# GUI runtime.
+PyQt6>=6.7,<7
+
+# Tests.
+pytest>=8.2,<9
+
+# macOS application and DMG packaging.
+pyinstaller>=6.10,<7
+
