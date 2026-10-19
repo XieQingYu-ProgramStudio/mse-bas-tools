@@ -271,8 +271,6 @@ class StartupController(QObject):
             self.app.setQuitOnLastWindowClosed(True)
             return
         worker.requestInterruption()
-        if not worker.wait(2500):
-            worker.terminate()
-            worker.wait(500)
+        worker.wait()
         self.worker = None
         self.app.setQuitOnLastWindowClosed(True)

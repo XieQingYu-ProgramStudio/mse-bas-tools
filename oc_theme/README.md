@@ -22,18 +22,16 @@
 EFI 分区挂载后执行：
 
 ```bash
-cd /path/to/month-star-bas-toolbox
+cd "$(git rev-parse --show-toplevel)"
 PYTHONPATH=. .venv/bin/python oc_theme/apply_theme.py "/Volumes/EFI/EFI/OC"
 ```
 
-源码仓库不附带 `OpenCanopy.efi` 二进制。安装前请从 OpenCore 官方发行包中取得
-与当前 OpenCore 版本匹配的 `OpenCanopy.efi`，放到：
+命令行应用前还必须显式确认驱动兼容：
 
-```text
-oc_theme/OpenCanopy.efi
+```bash
+PYTHONPATH=. .venv/bin/python oc_theme/apply_theme.py \
+  --compatibility-confirmed "/Volumes/EFI/EFI/OC"
 ```
-
-该文件属于 OpenCorePkg，使用和分发时应遵守其 BSD-3-Clause 许可证。
 
 安装脚本会：
 
@@ -60,6 +58,9 @@ oc_theme/OpenCanopy.efi
 
 安装前配置备份也会放在 EFI 的 `OC` 目录中，文件名以
 `config.plist.xieqingyu-` 开头。
+
+开源仓库不附带 `OpenCanopy.efi` 时，请从 OpenCore 官方发行包获取匹配版本并
+放到 `oc_theme/OpenCanopy.efi`。
 
 ## 风险
 

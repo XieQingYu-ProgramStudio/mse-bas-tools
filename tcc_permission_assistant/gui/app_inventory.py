@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -71,17 +72,38 @@ class AppInventoryWorker(QThread):
         results: dict[str, AppScanResult] = {}
         errors: list[tuple[Path, str]] = []
         total = len(paths)
-        for index, path in enumerate(paths, start=1):
-            if self.isInterruptionRequested():
-                break
-            self.progress.emit(index, total, path.name)
-            try:
-                result = scanner.scan(path)
-                if ".helper" in result.bundle_id.casefold():
-                    continue
-                results.setdefault(result.bundle_id, result)
-            except Exception as exc:
-                errors.append((path, str(exc)))
+        if paths:
+            workers = min(6, max(1, len(paths)))
+            with ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="app-scan",
+            ) as executor:
+                futures = {executor.submit(scanner.scan, path): path for path in paths}
+                for index, future in enumerate(as_completed(futures), start=1):
+                    path = futures[future]
+                    if self.isInterruptionRequested():
+                        for pending in futures:
+                            pending.cancel()
+                        break
+                    self.progress.emit(index, total, path.name)
+                    try:
+                        result = future.result()
+                        if ".helper" in result.bundle_id.casefold():
+                            continue
+                        if result.bundle_id in results:
+                            errors.append(
+                                (
+                                    path,
+                                    (
+                                        "重复 Bundle ID，已保留先扫描到的应用："
+                                        f"{results[result.bundle_id].path}"
+                                    ),
+                                )
+                            )
+                            continue
+                        results[result.bundle_id] = result
+                    except Exception as exc:
+                        errors.append((path, str(exc)))
         self.loaded.emit(
             (
                 tuple(

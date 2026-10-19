@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QFileInfo, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QFileInfo, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QFileIconProvider,
@@ -21,7 +21,6 @@ from PyQt6.QtWidgets import (
 
 from tcc_permission_assistant.core.app_names import chinese_app_names
 from tcc_permission_assistant.core.backup import BackupManager
-from tcc_permission_assistant.core.errors import InjectionError
 from tcc_permission_assistant.core.injector import (
     build_injection_plan,
     execute_dynamic_injection,
@@ -42,6 +41,7 @@ from tcc_permission_assistant.core.settings import LANGUAGE_ZH_HANS
 from tcc_permission_assistant.core.tcc_db import TCCDatabase
 from tcc_permission_assistant.gui.app_inventory import AppInventoryWorker
 from tcc_permission_assistant.gui.components import (
+    TaskThread,
     ToggleSwitch,
     action_button,
     page_header,
@@ -85,6 +85,9 @@ class DynamicPermissionsPage(QWidget):
         self._inventory_loaded = False
         self._updating = False
         self._writing = False
+        self._status_error: str | None = None
+        self._write_worker: TaskThread | None = None
+        self._pending_toggle: tuple[TCCService, bool, AppScanResult] | None = None
         self._icon_provider = QFileIconProvider()
         self._icon_by_bundle_id: dict[str, QIcon] = {}
         self._build_ui()
@@ -249,13 +252,14 @@ class DynamicPermissionsPage(QWidget):
 
     def shutdown(self) -> None:
         worker = self._inventory_worker
-        if worker is None or not worker.isRunning():
-            return
-        worker.requestInterruption()
-        if not worker.wait(3000):
-            worker.terminate()
-            worker.wait(1000)
+        if worker is not None and worker.isRunning():
+            worker.requestInterruption()
+            worker.wait()
         self._inventory_worker = None
+        write_worker = self._write_worker
+        if write_worker is not None and write_worker.isRunning():
+            write_worker.wait()
+        self._write_worker = None
 
     def _inventory_progress(self, index: int, total: int, name: str) -> None:
         self.inventory_status.setText(f"正在扫描 {index}/{total}：{name}")
@@ -413,6 +417,7 @@ class DynamicPermissionsPage(QWidget):
         except Exception as exc:
             statuses = {service: PermissionStatus.UNKNOWN for service in services}
             status_error = str(exc)
+        self._status_error = status_error
         self.current_statuses = statuses
         declared = set(result.recommended_services)
         related_services = [
@@ -486,7 +491,9 @@ class DynamicPermissionsPage(QWidget):
             )
             switch.setToolTip("开启并写入允许；关闭并删除权限记录")
             switch.setChecked(status is PermissionStatus.ALLOWED)
-            switch.setEnabled(not self._writing)
+            switch.setEnabled(not self._writing and status_error is None)
+            if status_error is not None:
+                switch.setToolTip("权限状态不可信，重新读取成功后才能修改。")
             switch.toggled.connect(
                 lambda checked, selected=service: self._toggle_permission(
                     selected,
@@ -514,14 +521,19 @@ class DynamicPermissionsPage(QWidget):
         result = self.current_result
         if self._updating or self._writing or result is None:
             return
-        definition = get_service_definition(service)
+        if self._status_error is not None:
+            self._set_operation_status(
+                f"权限状态读取失败：{self._status_error}",
+                error=True,
+            )
+            return
         action = PermissionAction.ALLOW if enabled else PermissionAction.DELETE
         self._writing = True
         self._set_switches_enabled(False)
-        success_message = ""
-        error_message = ""
-        had_error = False
-        try:
+        self._set_operation_status("正在写入用户级 TCC.db…")
+        self._pending_toggle = (service, enabled, result)
+
+        def perform() -> tuple[object, object]:
             plan = build_injection_plan(
                 self.database,
                 result.bundle_id,
@@ -532,45 +544,109 @@ class DynamicPermissionsPage(QWidget):
                 plan,
                 backup_manager=self.backup_manager,
             )
-            if not outcome.success:
-                raise InjectionError(
-                    f"写入后状态为 {STATUS_LABELS[outcome.verification.actual_status]}"
-                )
+            return plan, outcome
+
+        worker = TaskThread(perform, self)
+        worker.succeeded.connect(self._toggle_succeeded)
+        worker.failed.connect(self._toggle_failed)
+        worker.finished.connect(self._toggle_worker_finished)
+        self._write_worker = worker
+        worker.start()
+
+    def _toggle_succeeded(self, payload: object) -> None:
+        pending = self._pending_toggle
+        if pending is None:
+            return
+        service, enabled, result = pending
+        definition = get_service_definition(service)
+        plan, outcome = payload
+        if outcome.success:
             self.audit.event(
                 "gui_dynamic_permission",
                 bundle_id=result.bundle_id,
                 service=service.value,
                 enabled=enabled,
-                action=action.value,
+                action=plan.action.value,
                 backup_path=outcome.backup.path,
                 rows_changed=outcome.rows_changed,
                 verification=outcome.verification.actual_status.value,
             )
             action_text = "已开启" if enabled else "已关闭并删除记录"
-            success_message = f"{definition.display_name} {action_text}"
             self.environment_changed.emit()
-        except Exception as exc:
-            had_error = True
-            error_message = f"{definition.display_name} 操作失败：{exc}"
-            self.audit.event(
-                "gui_dynamic_permission_error",
-                bundle_id=result.bundle_id,
-                service=service.value,
-                enabled=enabled,
-                error_type=type(exc).__name__,
-                error=str(exc),
+            self._finish_toggle(
+                f"{definition.display_name} {action_text}",
             )
-        finally:
-            self._writing = False
-            QTimer.singleShot(
-                0,
-                lambda: self._finish_toggle(
-                    error_message or success_message,
-                    error=had_error,
-                ),
+            return
+
+        rollback_text = (
+            "，已自动回滚到备份"
+            if outcome.rolled_back
+            else (
+                f"，自动回滚失败：{outcome.rollback_error}"
+                if outcome.rollback_error
+                else ""
             )
+        )
+        error_message = (
+            f"{definition.display_name} 写入后状态为 "
+            f"{STATUS_LABELS[outcome.verification.actual_status]}"
+            f"{rollback_text}"
+        )
+        self._record_toggle_error(
+            service,
+            enabled,
+            result,
+            error_message,
+            rolled_back=outcome.rolled_back,
+            rollback_error=outcome.rollback_error,
+        )
+        self._finish_toggle(error_message, error=True)
+
+    def _toggle_failed(self, error: object) -> None:
+        pending = self._pending_toggle
+        if pending is None:
+            return
+        service, enabled, result = pending
+        definition = get_service_definition(service)
+        message = f"{definition.display_name} 操作失败：{error}"
+        self._record_toggle_error(
+            service,
+            enabled,
+            result,
+            message,
+        )
+        self._finish_toggle(message, error=True)
+
+    def _record_toggle_error(
+        self,
+        service: TCCService,
+        enabled: bool,
+        result: AppScanResult,
+        message: str,
+        *,
+        rolled_back: bool = False,
+        rollback_error: str | None = None,
+    ) -> None:
+        self.audit.event(
+            "gui_dynamic_permission_error",
+            bundle_id=result.bundle_id,
+            service=service.value,
+            enabled=enabled,
+            error_type="InjectionError",
+            error=message,
+            rolled_back=rolled_back,
+            rollback_error=rollback_error,
+        )
+
+    def _toggle_worker_finished(self) -> None:
+        worker = self._write_worker
+        if worker is not None:
+            worker.deleteLater()
+        self._write_worker = None
 
     def _finish_toggle(self, status_message: str, *, error: bool = False) -> None:
+        self._writing = False
+        self._pending_toggle = None
         self._updating = True
         try:
             self.refresh_permissions(status_message=status_message)
@@ -589,6 +665,7 @@ class DynamicPermissionsPage(QWidget):
         self.permission_empty.setVisible(True)
         self.permission_count.setText("0 项")
         self.current_statuses = {}
+        self._status_error = None
         self._service_by_row.clear()
         self._switch_by_service.clear()
 

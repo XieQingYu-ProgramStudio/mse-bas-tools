@@ -32,8 +32,14 @@ def default_backup_root(home: Path | None = None) -> Path:
 class BackupManager:
     """Create timestamped backups without overwriting existing files."""
 
-    def __init__(self, backup_root: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        backup_root: str | Path | None = None,
+        *,
+        retention: int = 50,
+    ) -> None:
         self.backup_root = Path(backup_root or default_backup_root()).expanduser()
+        self.retention = max(1, retention)
 
     def directory_for_scope(self, scope: TCCDatabaseScope) -> Path:
         return self.backup_root / scope.value
@@ -88,7 +94,7 @@ class BackupManager:
         if final_path is None:
             raise BackupError("备份文件未能写入目标目录。")
         try:
-            return BackupInfo(
+            info = BackupInfo(
                 path=final_path,
                 source_path=source_path,
                 scope=parsed_scope,
@@ -98,6 +104,24 @@ class BackupManager:
             )
         except OSError as exc:
             raise BackupError(f"无法校验备份文件：{final_path}") from exc
+        self.prune_backups(parsed_scope)
+        return info
+
+    def prune_backups(
+        self,
+        scope: TCCDatabaseScope | str = TCCDatabaseScope.USER,
+    ) -> tuple[Path, ...]:
+        """Remove oldest managed backups beyond the retention limit."""
+
+        backups = self.list_backups(scope)
+        removed: list[Path] = []
+        for path in backups[self.retention :]:
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed.append(path)
+        return tuple(removed)
 
     def list_backups(
         self,

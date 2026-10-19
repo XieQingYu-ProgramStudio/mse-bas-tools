@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from tcc_permission_assistant.core.models import (
     PermissionAction,
     PermissionStatus,
     TCCDatabaseScope,
+    TCCRecord,
     TCCService,
     VerificationResult,
 )
@@ -56,6 +58,7 @@ def build_injection_plan(
     action: PermissionAction | str,
     *,
     now_epoch: int | None = None,
+    indirect_object_identifier: str | None = None,
 ) -> InjectionPlan:
     """Build an UPDATE, INSERT, or DELETE statement from the live schema."""
 
@@ -72,12 +75,27 @@ def build_injection_plan(
         validated_bundle_id,
         [resolved_service],
     )[0]
+    target_identifier = _resolve_indirect_object_identifier(
+        resolved_service,
+        lookup.records,
+        indirect_object_identifier,
+    )
+    target_records = (
+        tuple(
+            record
+            for record in lookup.records
+            if str(record.indirect_object_identifier) == target_identifier
+        )
+        if target_identifier is not None
+        else lookup.records
+    )
     timestamp = int(time.time()) if now_epoch is None else int(now_epoch)
 
     if parsed_action is PermissionAction.DELETE:
         statement, parameters = _build_delete(
             validated_bundle_id,
             resolved_service,
+            target_identifier,
         )
         operation = InjectionOperation.DELETE
     elif lookup.records:
@@ -86,6 +104,7 @@ def build_injection_plan(
             validated_bundle_id,
             resolved_service,
             parsed_action,
+            target_identifier,
         )
         operation = InjectionOperation.UPDATE
     else:
@@ -95,6 +114,7 @@ def build_injection_plan(
             resolved_service,
             parsed_action,
             timestamp,
+            target_identifier,
         )
         operation = InjectionOperation.INSERT
 
@@ -105,8 +125,8 @@ def build_injection_plan(
         service=resolved_service,
         action=parsed_action,
         operation=operation,
-        current_status=lookup.status,
-        existing_record_count=len(lookup.records),
+        current_status=_status_from_records(target_records),
+        existing_record_count=len(target_records),
         statement=statement,
         parameters=tuple(parameters),
         literal_sql=render_literal_sql(statement, parameters),
@@ -116,6 +136,7 @@ def build_injection_plan(
             f"{validated_bundle_id}"
         ),
         generated_at_epoch=timestamp,
+        indirect_object_identifier=target_identifier,
     )
 
 
@@ -134,12 +155,18 @@ def execute_dynamic_injection(
         TCCDatabaseScope.USER,
     )
     rows_changed = _execute_write(validated_plan, backup.path)
-    verification = _verify_plan(validated_plan, backup.path)
+    verifications, rolled_back, rollback_error = _verify_and_rollback(
+        (validated_plan,),
+        backup.path,
+    )
+    verification = verifications[0]
     return InjectionResult(
         plan=validated_plan,
         backup=backup,
         rows_changed=rows_changed,
         verification=verification,
+        rolled_back=rolled_back,
+        rollback_error=rollback_error,
     )
 
 
@@ -166,12 +193,18 @@ def execute_injection(
         TCCDatabaseScope.USER,
     )
     rows_changed = _execute_write(validated_plan, backup.path)
-    verification = _verify_plan(validated_plan, backup.path)
+    verifications, rolled_back, rollback_error = _verify_and_rollback(
+        (validated_plan,),
+        backup.path,
+    )
+    verification = verifications[0]
     return InjectionResult(
         plan=validated_plan,
         backup=backup,
         rows_changed=rows_changed,
         verification=verification,
+        rolled_back=rolled_back,
+        rollback_error=rollback_error,
     )
 
 
@@ -211,12 +244,17 @@ def execute_batch_injection(
     manager = backup_manager or BackupManager()
     backup = manager.create_backup(database_path, TCCDatabaseScope.USER)
     rows_changed = _execute_batch_write(validated_plans, backup.path)
-    verifications = tuple(_verify_plan(plan, backup.path) for plan in validated_plans)
+    verifications, rolled_back, rollback_error = _verify_and_rollback(
+        validated_plans,
+        backup.path,
+    )
     return BatchInjectionResult(
         plans=validated_plans,
         backup=backup,
         rows_changed=rows_changed,
         verifications=verifications,
+        rolled_back=rolled_back,
+        rollback_error=rollback_error,
     )
 
 
@@ -279,6 +317,61 @@ def _execute_batch_write(
             connection.close()
 
 
+def _verify_and_rollback(
+    plans: tuple[InjectionPlan, ...],
+    backup_path: Path,
+) -> tuple[tuple[VerificationResult, ...], bool, str | None]:
+    verifications: list[VerificationResult] = []
+    try:
+        for plan in plans:
+            verifications.append(_verify_plan(plan, backup_path))
+    except VerificationError as exc:
+        rollback_error = _rollback_database(backup_path, plans[0].database_path)
+        if rollback_error is None:
+            raise VerificationError(f"{exc} 已自动回滚到备份。") from exc
+        raise VerificationError(
+            f"{exc} 自动回滚失败：{rollback_error}。请手动恢复备份：{backup_path}"
+        ) from exc
+
+    if verifications and all(result.success for result in verifications):
+        return tuple(verifications), False, None
+
+    rollback_error = _rollback_database(backup_path, plans[0].database_path)
+    return tuple(verifications), rollback_error is None, rollback_error
+
+
+def _rollback_database(backup_path: Path, database_path: Path) -> str | None:
+    source: sqlite3.Connection | None = None
+    target: sqlite3.Connection | None = None
+    try:
+        source = sqlite3.connect(
+            f"{backup_path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=2.0,
+        )
+        source.execute("PRAGMA busy_timeout = 2000")
+        source.execute("PRAGMA query_only = ON")
+        target = sqlite3.connect(
+            f"{database_path.as_uri()}?mode=rw",
+            uri=True,
+            timeout=2.0,
+            isolation_level=None,
+        )
+        target.execute("PRAGMA busy_timeout = 2000")
+        source.backup(target)
+        check = target.execute("PRAGMA quick_check").fetchone()
+        if check is None or str(check[0]).casefold() != "ok":
+            return "回滚数据库完整性检查失败。"
+        return None
+    except sqlite3.Error as exc:
+        return str(exc)
+    finally:
+        if target is not None:
+            target.close()
+        if source is not None:
+            source.close()
+
+
 def _verify_plan(plan: InjectionPlan, backup_path: Path) -> VerificationResult:
     if plan.action is PermissionAction.ALLOW:
         expected = PermissionStatus.ALLOWED
@@ -295,11 +388,21 @@ def _verify_plan(plan: InjectionPlan, backup_path: Path) -> VerificationResult:
         raise VerificationError(
             f"写入后验证失败：{exc}。备份位于：{backup_path}"
         ) from exc
+    records = (
+        tuple(
+            record
+            for record in lookup.records
+            if str(record.indirect_object_identifier) == plan.indirect_object_identifier
+        )
+        if plan.indirect_object_identifier is not None
+        else lookup.records
+    )
+    actual = _status_from_records(records)
     return VerificationResult(
-        success=lookup.status is expected,
+        success=actual is expected,
         expected_status=expected,
-        actual_status=lookup.status,
-        records=lookup.records,
+        actual_status=actual,
+        records=records,
     )
 
 
@@ -311,6 +414,7 @@ def _validate_plan_for_execution(plan: InjectionPlan) -> InjectionPlan:
         plan.service,
         plan.action,
         now_epoch=plan.generated_at_epoch,
+        indirect_object_identifier=plan.indirect_object_identifier,
     )
     if regenerated != plan:
         raise InjectionError(
@@ -324,6 +428,7 @@ def _build_update(
     bundle_id: str,
     service: TCCService,
     action: PermissionAction,
+    indirect_object_identifier: str | None,
 ) -> tuple[str, list[object]]:
     assignments = ["auth_value = ?"]
     parameters: list[object] = [action.auth_value]
@@ -337,17 +442,23 @@ def _build_update(
     statement = (
         f"UPDATE access SET {', '.join(assignments)} WHERE client = ? AND service = ?"
     )
+    if indirect_object_identifier is not None:
+        statement += " AND indirect_object_identifier = ?"
+        parameters.append(indirect_object_identifier)
     return statement, parameters
 
 
 def _build_delete(
     bundle_id: str,
     service: TCCService,
+    indirect_object_identifier: str | None,
 ) -> tuple[str, list[object]]:
-    return (
-        "DELETE FROM access WHERE client = ? AND service = ?",
-        [bundle_id, service.value],
-    )
+    statement = "DELETE FROM access WHERE client = ? AND service = ?"
+    parameters: list[object] = [bundle_id, service.value]
+    if indirect_object_identifier is not None:
+        statement += " AND indirect_object_identifier = ?"
+        parameters.append(indirect_object_identifier)
+    return statement, parameters
 
 
 def _build_insert(
@@ -356,6 +467,7 @@ def _build_insert(
     service: TCCService,
     action: PermissionAction,
     timestamp: int,
+    indirect_object_identifier: str | None,
 ) -> tuple[str, list[object]]:
     values: dict[str, object] = {
         "service": service.value,
@@ -368,6 +480,10 @@ def _build_insert(
         values["auth_version"] = INSERT_AUTH_VERSION
     if schema.has_column("client_type"):
         values["client_type"] = INSERT_CLIENT_TYPE
+    if schema.has_column("indirect_object_identifier") and (
+        indirect_object_identifier is not None
+    ):
+        values["indirect_object_identifier"] = indirect_object_identifier
 
     fallbacks: dict[str, object] = {
         "indirect_object_identifier": "UNUSED",
@@ -402,6 +518,41 @@ def _build_insert(
     placeholders = ", ".join("?" for _ in columns)
     statement = f"INSERT INTO access ({', '.join(columns)}) VALUES ({placeholders})"
     return statement, list(values.values())
+
+
+def _resolve_indirect_object_identifier(
+    service: TCCService,
+    records: Sequence[TCCRecord],
+    explicit: str | None,
+) -> str | None:
+    if service is not TCCService.APPLE_EVENTS:
+        return None
+    if explicit is not None:
+        value = explicit.strip()
+        if not value:
+            raise InjectionError("Apple Events 目标标识不能为空。")
+        return value
+    targets = {
+        str(record.indirect_object_identifier)
+        for record in records
+        if record.indirect_object_identifier not in (None, "", "UNUSED")
+    }
+    if len(targets) == 1:
+        return targets.pop()
+    if len(targets) > 1:
+        raise InjectionError(
+            "该应用存在多个 Apple Events 目标，必须逐项指定 indirect object。"
+        )
+    raise InjectionError(
+        "Apple Events 权限必须指定目标应用，不能在通用开关中批量处理。"
+    )
+
+
+def _status_from_records(records: Sequence[TCCRecord]) -> PermissionStatus:
+    if not records:
+        return PermissionStatus.NO_RECORD
+    statuses = {record.status for record in records}
+    return next(iter(statuses)) if len(statuses) == 1 else PermissionStatus.UNKNOWN
 
 
 def render_literal_sql(

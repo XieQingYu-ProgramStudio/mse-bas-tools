@@ -36,3 +36,17 @@ def permission_statuses(
     active_database = database or TCCDatabase.for_scope(TCCDatabaseScope.USER)
     lookups = active_database.lookup_permissions(bundle_id, services)
     return {lookup.service: lookup.status for lookup in lookups}
+
+
+def permission_statuses_for_clients(
+    bundle_ids: Sequence[str],
+    services: Sequence[TCCService],
+    database: TCCDatabase | None = None,
+) -> dict[str, dict[TCCService, PermissionStatus]]:
+    if not bundle_ids or not services:
+        return {}
+    active_database = database or TCCDatabase.for_scope(TCCDatabaseScope.USER)
+    return active_database.lookup_permission_statuses_for_clients(
+        bundle_ids,
+        services,
+    )

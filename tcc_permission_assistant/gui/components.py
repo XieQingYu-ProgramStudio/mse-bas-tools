@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from PyQt6.QtCore import QRectF, QSize, Qt
+from PyQt6.QtCore import QRectF, QSize, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPaintEvent, QPen
 from PyQt6.QtWidgets import (
     QAbstractButton,
@@ -274,3 +274,22 @@ class ToggleSwitch(QAbstractButton):
             painter.setPen(QPen(QColor(COLORS["accent"]), 1.5))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(QRectF(0.75, 1.75, 44.5, 22.5), 11, 11)
+
+
+class TaskThread(QThread):
+    """Run one callable without blocking the Qt event loop."""
+
+    succeeded = pyqtSignal(object)
+    failed = pyqtSignal(object)
+
+    def __init__(self, task, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._task = task
+
+    def run(self) -> None:
+        try:
+            result = self._task()
+        except Exception as exc:
+            self.failed.emit(exc)
+            return
+        self.succeeded.emit(result)

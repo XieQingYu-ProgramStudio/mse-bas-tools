@@ -1,4 +1,4 @@
-# 月星BAS工具箱 1.1.0
+# 月星BAS工具箱 1.1.1
 
 月星BAS工具箱是一款面向 macOS 15 与 OpenCore 环境的本地权限和系统维护工具。
 图形界面使用 PyQt6，权限扫描、数据库写入、备份和诊断保留完整的本地审计记录。
@@ -37,7 +37,7 @@
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e ".[gui,test]"
+python -m pip install -e ".[gui]"
 ```
 
 ### 使用打包应用
@@ -51,7 +51,7 @@ dist/月星BAS工具箱.app
 安装镜像位于：
 
 ```text
-dist/月星BAS工具箱-1.1.0.dmg
+dist/月星BAS工具箱-1.1.1.dmg
 ```
 
 将应用拖入“应用程序”后再启用登录启动。直接从 DMG 挂载卷运行时，登录启动
@@ -104,12 +104,16 @@ python -m tcc_permission_assistant.app
 - 点亮开关立即写入允许；
 - 关闭开关立即删除该应用对应 service 的全部用户级记录；
 - 每次切换自动备份 TCC.db，并在事务提交后重新读取验证；
+- 验证失败时自动回滚到操作前备份；
 - 成功或失败状态显示在页面底部，不弹出确认框。
 
 ![动态权限](docs/screenshots/dynamic-permissions.png)
 
 关闭开关执行数据库记录删除，不是写入 `auth_value = 0` 的拒绝状态。应用之后
 重新请求权限时，macOS 仍可再次显示原生权限窗口。
+
+Apple Events 可能包含多个目标应用记录。通用开关不会批量修改这些记录，多目标
+场景必须使用逐目标接口。
 
 ### 批量授权
 
@@ -173,6 +177,8 @@ EFI 分区通过 `diskutil list -plist physical` 只读识别。挂载或卸载�
 - 自动发现已挂载的 `EFI/OC`，也支持手动选择目录；
 - 应用前备份配置、标签、原主题和 OpenCanopy 驱动；
 - 应用后执行 `plutil -lint`，失败时自动回滚；
+- config.plist 与驱动使用 `fsync` 和原子替换写入；
+- 应用前必须确认当前 OpenCore 与 OpenCanopy 驱动兼容；
 - 从备份列表还原，并在还原前保存当前状态。
 
 开源源码不附带 `OpenCanopy.efi`。首次应用前需从 OpenCore 官方发行包获取匹配
@@ -303,7 +309,7 @@ yuexing-bas restore --file "/path/to/TCC-user-xxxx.bak" --execute
 
 ```text
 dist/月星BAS工具箱.app
-dist/月星BAS工具箱-1.1.0.dmg
+dist/月星BAS工具箱-1.1.1.dmg
 ```
 
 `.app` 包含 Python 3.11、PyQt6、Qt 依赖、应用图标和工作室 Logo。构建脚本会
@@ -316,6 +322,36 @@ dist/月星BAS工具箱-1.1.0.dmg
 
 完整版本记录见 [CHANGELOG.md](CHANGELOG.md)。
 
+## 开源目录与上传范围
+
+应上传到代码仓库的目录：
+
+```text
+tcc_permission_assistant/
+packaging/
+oc_theme/
+docs/screenshots/
+```
+
+同时上传根目录文件：
+
+```text
+README.md
+CHANGELOG.md
+.gitignore
+pyproject.toml
+requirements.txt
+build_macos.sh
+SECURITY.md
+THIRD_PARTY_NOTICES.md
+BRAND_ASSETS.md
+LICENSE
+LICENSES/
+```
+
+开源目录不包含 `tests/`、`.venv/`、`build/`、`dist/`、`.run/`、缓存、
+DMG、编译应用或任何个人路径。
+
 ## 安全边界
 
 - 仅在用户确认后修改 OpenCore `config.plist`，并先备份、校验和自动回滚。
@@ -324,6 +360,8 @@ dist/月星BAS工具箱-1.1.0.dmg
 - 扫描、生成和诊断默认只读。
 - 写入仅限用户级数据库。
 - GUI 动态开关不弹确认，但每次自动备份并回读验证。
+- 写入后验证失败会自动恢复到本次操作前备份。
+- Apple Events 不再允许通过单开关批量修改多个目标。
 - 命令行写入和数据库恢复必须完成人工确认。
 - 系统级数据库注入不可用；系统级恢复必须获取管理员授权。
 - 不拦截、仿冒或代替 macOS `tccd` 原生权限窗口。
@@ -338,10 +376,11 @@ dist/月星BAS工具箱-1.1.0.dmg
 
 ## 许可证状态
 
-本目录是开源发布准备版，作者仍需在首次公开发布前选择并添加根目录 `LICENSE`。
+本项目采用 **GNU General Public License v3.0 only**，完整许可证见根目录
+`LICENSE`。
 
 项目使用 PyQt6。公开分发 PyQt6 应用通常需要采用 GPLv3，或从 Riverbank 获取
-商业许可；若希望采用 MIT 或 Apache-2.0，应先迁移到 PySide6 并遵守 LGPLv3。
+商业许可。本仓库使用 GPLv3 路线。
 
 第三方组件和品牌资产说明见：
 

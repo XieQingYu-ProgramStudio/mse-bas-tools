@@ -33,6 +33,7 @@ from tcc_permission_assistant.core.permission_map import get_service_definition
 from tcc_permission_assistant.core.scanner import AppScanner
 from tcc_permission_assistant.core.settings import LANGUAGE_SYSTEM
 from tcc_permission_assistant.gui.components import (
+    TaskThread,
     action_button,
     page_header,
     panel,
@@ -78,6 +79,8 @@ class ScanPage(QWidget):
         self.display_language = display_language
         self.current_result: AppScanResult | None = None
         self.current_statuses: dict = {}
+        self._scan_worker: TaskThread | None = None
+        self._scan_bundle_path: Path | None = None
         self.setAcceptDrops(True)
         self._build_ui()
 
@@ -266,12 +269,19 @@ class ScanPage(QWidget):
                 f"所选路径不在 .app 应用包内：{app_path}",
             )
             return
+        if self._scan_worker is not None:
+            return
+        self._scan_bundle_path = bundle_path
+        self.inject_button.setEnabled(False)
+        self.inject_button.setText("正在扫描…")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
+
+        def perform():
             result = AppScanner(
                 audit_logger=self.audit,
                 display_language=self.display_language,
             ).scan(bundle_path)
+            status_error: str | None = None
             try:
                 statuses = permission_statuses(
                     result.bundle_id,
@@ -282,38 +292,71 @@ class ScanPage(QWidget):
                     service: PermissionStatus.UNKNOWN
                     for service in result.recommended_services
                 }
-                result = AppScanResult(
-                    name=result.name,
-                    path=result.path,
-                    bundle_id=result.bundle_id,
-                    short_version=result.short_version,
-                    bundle_version=result.bundle_version,
-                    signing=result.signing,
-                    permissions=result.permissions,
-                    recommended_services=result.recommended_services,
-                    warnings=(
-                        *result.warnings,
-                        f"无法读取用户级 TCC 状态：{exc}",
-                    ),
-                )
-            self.set_scan_result(result, statuses)
-            self.audit.event(
-                "gui_scan",
+                status_error = str(exc)
+            return result, statuses, status_error
+
+        worker = TaskThread(perform, self)
+        worker.succeeded.connect(self._scan_succeeded)
+        worker.failed.connect(self._scan_failed)
+        worker.finished.connect(self._scan_finished)
+        self._scan_worker = worker
+        worker.start()
+
+    def _scan_succeeded(self, payload: object) -> None:
+        result, statuses, status_error = payload
+        if status_error is not None:
+            result = AppScanResult(
+                name=result.name,
                 path=result.path,
                 bundle_id=result.bundle_id,
-                services=[service.value for service in result.recommended_services],
-                warning_count=len(result.warnings),
+                short_version=result.short_version,
+                bundle_version=result.bundle_version,
+                signing=result.signing,
+                permissions=result.permissions,
+                recommended_services=result.recommended_services,
+                warnings=(
+                    *result.warnings,
+                    f"无法读取用户级 TCC 状态：{status_error}",
+                ),
             )
-        except Exception as exc:
+        self.set_scan_result(result, statuses)
+        self.audit.event(
+            "gui_scan",
+            path=result.path,
+            bundle_id=result.bundle_id,
+            services=[service.value for service in result.recommended_services],
+            warning_count=len(result.warnings),
+        )
+
+    def _scan_failed(self, error: object) -> None:
+        bundle_path = self._scan_bundle_path
+        if bundle_path is not None:
             self.audit.event(
                 "scan_error",
                 path=bundle_path,
-                error_type=type(exc).__name__,
-                error=str(exc),
+                error_type=type(error).__name__,
+                error=str(error),
             )
-            show_error(self, "扫描失败", exc)
-        finally:
-            QApplication.restoreOverrideCursor()
+        show_error(self, "扫描失败", error)
+
+    def _scan_finished(self) -> None:
+        worker = self._scan_worker
+        if worker is not None:
+            worker.deleteLater()
+        self._scan_worker = None
+        self._scan_bundle_path = None
+        self.inject_button.setText("打开动态权限")
+        if self.current_result is not None:
+            self.inject_button.setEnabled(
+                bool(self.current_result.recommended_services)
+            )
+        QApplication.restoreOverrideCursor()
+
+    def shutdown(self) -> None:
+        worker = self._scan_worker
+        if worker is not None and worker.isRunning():
+            worker.wait()
+        self._scan_worker = None
 
     def set_scan_result(
         self,

@@ -266,6 +266,10 @@ def _add_injection_arguments(parser: argparse.ArgumentParser) -> None:
         const=PermissionAction.DENY.value,
         help="写入拒绝状态（auth_value=0）",
     )
+    parser.add_argument(
+        "--indirect-object",
+        help="Apple Events 权限的目标应用或 Bundle ID",
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -574,6 +578,8 @@ def _inject(args: argparse.Namespace, audit: AuditLogger) -> int:
         rows_changed=result.rows_changed,
         verification=result.verification.actual_status.value,
         success=result.success,
+        rolled_back=result.rolled_back,
+        rollback_error=result.rollback_error,
     )
 
     if args.json:
@@ -593,6 +599,7 @@ def _build_cli_injection_plan(args: argparse.Namespace) -> InjectionPlan:
         args.bundle,
         args.service,
         args.action,
+        indirect_object_identifier=args.indirect_object,
     )
 
 
@@ -621,6 +628,11 @@ def _print_injection_plan(
         file=output,
     )
     print(f"  目标状态：{action_label} (auth_value={plan.auth_value})", file=output)
+    if plan.indirect_object_identifier is not None:
+        print(
+            f"  间接对象：{plan.indirect_object_identifier}",
+            file=output,
+        )
     print(f"  SQL：{plan.statement}", file=output)
     print(
         f"  参数：{json.dumps(list(plan.parameters), ensure_ascii=False)}",
@@ -669,6 +681,10 @@ def _print_injection_result(result: InjectionResult) -> None:
         + f"（预期 {_PERMISSION_STATUS_LABELS[verification.expected_status]}，"
         + f"实际 {_PERMISSION_STATUS_LABELS[verification.actual_status]}）"
     )
+    if result.rolled_back:
+        print("已自动回滚到操作前备份。")
+    elif result.rollback_error:
+        print(f"自动回滚失败：{result.rollback_error}")
     print("请完全退出相关应用后重新打开测试。")
 
 

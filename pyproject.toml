@@ -4,10 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yuexing-bas-toolbox"
-version = "1.1.0"
+version = "1.1.1"
 description = "月星BAS工具箱：macOS TCC 权限诊断、动态授权与恢复"
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "GPL-3.0-only" }
 authors = [
   { name = "谢清宇@谢清宇工作室" },
 ]

@@ -212,6 +212,7 @@ class TCCRecord:
     auth_reason: int | str | None = None
     auth_version: int | str | None = None
     client_type: int | str | None = None
+    indirect_object_identifier: int | str | None = None
     last_modified: int | str | None = None
 
     @property
@@ -219,7 +220,7 @@ class TCCRecord:
         return PermissionStatus.from_auth_value(self.auth_value)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "service": self.service.value,
             "client": self.client,
             "auth_value": self.auth_value,
@@ -229,6 +230,9 @@ class TCCRecord:
             "last_modified": self.last_modified,
             "status": self.status.value,
         }
+        if self.indirect_object_identifier is not None:
+            payload["indirect_object_identifier"] = self.indirect_object_identifier
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,6 +318,7 @@ class InjectionPlan:
     literal_sql: str
     reset_command: str
     generated_at_epoch: int
+    indirect_object_identifier: str | None = None
 
     @property
     def auth_value(self) -> int | None:
@@ -335,6 +340,7 @@ class InjectionPlan:
             "literal_sql": self.literal_sql,
             "reset_command": self.reset_command,
             "generated_at_epoch": self.generated_at_epoch,
+            "indirect_object_identifier": self.indirect_object_identifier,
         }
 
 
@@ -387,6 +393,7 @@ class RestorePlan:
     target_path: Path
     scope: TCCDatabaseScope
     current_database_exists: bool
+    source_access_row_count: int
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -394,6 +401,7 @@ class RestorePlan:
             "target_path": str(self.target_path),
             "scope": self.scope.value,
             "current_database_exists": self.current_database_exists,
+            "source_access_row_count": self.source_access_row_count,
             "default_dry_run": True,
         }
 
@@ -451,6 +459,8 @@ class InjectionResult:
     backup: BackupInfo
     rows_changed: int
     verification: VerificationResult
+    rolled_back: bool = False
+    rollback_error: str | None = None
 
     @property
     def success(self) -> bool:
@@ -463,6 +473,8 @@ class InjectionResult:
             "backup": self.backup.to_dict(),
             "rows_changed": self.rows_changed,
             "verification": self.verification.to_dict(),
+            "rolled_back": self.rolled_back,
+            "rollback_error": self.rollback_error,
         }
 
 
@@ -474,6 +486,8 @@ class BatchInjectionResult:
     backup: BackupInfo
     rows_changed: int
     verifications: tuple[VerificationResult, ...]
+    rolled_back: bool = False
+    rollback_error: str | None = None
 
     @property
     def success(self) -> bool:
@@ -492,6 +506,8 @@ class BatchInjectionResult:
             "rows_changed": self.rows_changed,
             "plan_count": len(self.plans),
             "verification_count": self.verification_count,
+            "rolled_back": self.rolled_back,
+            "rollback_error": self.rollback_error,
             "plans": [plan.to_dict() for plan in self.plans],
             "verifications": [
                 verification.to_dict() for verification in self.verifications

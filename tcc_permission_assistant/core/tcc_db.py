@@ -21,6 +21,7 @@ from tcc_permission_assistant.core.models import (
     AccessSchema,
     DatabaseInspection,
     PermissionLookup,
+    PermissionStatus,
     ServiceRecordCount,
     TCCDatabaseScope,
     TCCRecord,
@@ -40,6 +41,7 @@ OPTIONAL_RECORD_COLUMNS = (
     "auth_reason",
     "auth_version",
     "last_modified",
+    "indirect_object_identifier",
 )
 
 
@@ -130,6 +132,59 @@ class TCCDatabase:
             )
             for service in selected_services
         )
+
+    def lookup_permission_statuses_for_clients(
+        self,
+        clients: Sequence[str],
+        services: Sequence[TCCService | str] | None = None,
+    ) -> dict[str, dict[TCCService, PermissionStatus]]:
+        """Return status maps for many clients using one read connection."""
+
+        validated_clients: list[str] = []
+        for client in clients:
+            validated = validate_bundle_id(client)
+            if validated not in validated_clients:
+                validated_clients.append(validated)
+        selected_services = _normalize_services(services)
+        result = {
+            client: {
+                service: PermissionStatus.NO_RECORD for service in selected_services
+            }
+            for client in validated_clients
+        }
+        if not validated_clients:
+            return result
+
+        with self._read_connection() as connection:
+            client_placeholders = ", ".join("?" for _ in validated_clients)
+            service_placeholders = ", ".join("?" for _ in selected_services)
+            try:
+                rows = connection.execute(
+                    "SELECT client, service, auth_value FROM access "
+                    f"WHERE client IN ({client_placeholders}) "
+                    f"AND service IN ({service_placeholders})",
+                    (
+                        *validated_clients,
+                        *(service.value for service in selected_services),
+                    ),
+                ).fetchall()
+            except sqlite3.Error as exc:
+                raise TCCQueryError("批量查询 TCC 权限记录失败。") from exc
+
+        observed: dict[tuple[str, TCCService], set[PermissionStatus]] = {}
+        for client, service_value, auth_value in rows:
+            try:
+                service = TCCService(str(service_value))
+            except ValueError as exc:
+                raise TCCQueryError("数据库返回了白名单之外的 TCC service。") from exc
+            observed.setdefault((str(client), service), set()).add(
+                PermissionStatus.from_auth_value(auth_value)
+            )
+        for (client, service), statuses in observed.items():
+            result[client][service] = (
+                next(iter(statuses)) if len(statuses) == 1 else PermissionStatus.UNKNOWN
+            )
+        return result
 
     def read_access_schema(self) -> AccessSchema:
         """Return the current access schema without querying client data."""
@@ -235,6 +290,7 @@ class TCCDatabase:
                     auth_reason=values.get("auth_reason"),
                     auth_version=values.get("auth_version"),
                     client_type=values.get("client_type"),
+                    indirect_object_identifier=values.get("indirect_object_identifier"),
                     last_modified=values.get("last_modified"),
                 )
             )

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -104,7 +106,7 @@ def build_restore_plan(
     if not manager.is_managed_backup(candidate, parsed_scope):
         raise RestoreSourceError("恢复来源必须是本工具管理目录中的 .bak 文件。")
     try:
-        TCCDatabase(candidate).read_access_schema()
+        inspection = TCCDatabase(candidate).inspect()
     except TCCAssistantError as exc:
         raise RestoreSourceError(f"备份文件不是有效的 TCC 数据库：{exc}") from exc
 
@@ -116,6 +118,7 @@ def build_restore_plan(
         target_path=target_path,
         scope=parsed_scope,
         current_database_exists=target_path.is_file(),
+        source_access_row_count=inspection.access_row_count,
     )
 
 
@@ -170,12 +173,48 @@ def execute_restore(
                     + _backup_suffix(pre_restore_backup)
                 )
         inspection = TCCDatabase(plan.target_path, plan.scope).inspect()
+        if inspection.access_row_count != plan.source_access_row_count:
+            raise RestoreVerificationError(
+                "恢复后的 access 记录数与备份不一致"
+                f"（备份 {plan.source_access_row_count}，"
+                f"实际 {inspection.access_row_count}）"
+            )
+    except RestoreVerificationError as exc:
+        if plan.scope is TCCDatabaseScope.USER and pre_restore_backup is not None:
+            try:
+                _restore_user_database(
+                    pre_restore_backup.path,
+                    plan.target_path,
+                )
+            except (RestoreError, OSError, sqlite3.Error) as rollback_exc:
+                raise RestoreVerificationError(
+                    f"{exc}。自动回滚失败：{rollback_exc}。"
+                    f"备份位于：{pre_restore_backup.path}"
+                ) from exc
+            raise RestoreVerificationError(
+                f"{exc}。已自动回滚到恢复前备份：{pre_restore_backup.path}"
+            ) from exc
+        raise
     except RestoreError:
         raise
     except TCCAssistantError as exc:
-        raise RestoreVerificationError(
+        verification_error = RestoreVerificationError(
             f"恢复后验证失败：{exc}{_backup_suffix(pre_restore_backup)}"
-        ) from exc
+        )
+        if plan.scope is TCCDatabaseScope.USER and pre_restore_backup is not None:
+            try:
+                _restore_user_database(
+                    pre_restore_backup.path,
+                    plan.target_path,
+                )
+            except (RestoreError, OSError, sqlite3.Error) as rollback_exc:
+                raise RestoreVerificationError(
+                    f"{verification_error}。自动回滚失败：{rollback_exc}"
+                ) from exc
+            raise RestoreVerificationError(
+                f"{verification_error}。已自动回滚到恢复前备份。"
+            ) from exc
+        raise verification_error from exc
     except (OSError, sqlite3.Error) as exc:
         raise RestoreError(
             f"恢复 TCC 数据库失败：{exc}{_backup_suffix(pre_restore_backup)}"
@@ -196,6 +235,7 @@ def _restore_user_database(source_path: Path, target_path: Path) -> None:
         raise RestoreError(f"目标数据库目录不存在：{target_path.parent}")
     source: sqlite3.Connection | None = None
     target: sqlite3.Connection | None = None
+    temporary_path: Path | None = None
     try:
         source = sqlite3.connect(
             f"{source_path.as_uri()}?mode=ro",
@@ -203,13 +243,28 @@ def _restore_user_database(source_path: Path, target_path: Path) -> None:
             timeout=2.0,
         )
         source.execute("PRAGMA query_only = ON")
-        target = sqlite3.connect(target_path, timeout=2.0)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".TCC-restore-",
+            suffix=".db",
+            dir=target_path.parent,
+        )
+        os.close(descriptor)
+        temporary_path = Path(temporary_name)
+        target = sqlite3.connect(temporary_path, timeout=2.0)
         target.execute("PRAGMA busy_timeout = 2000")
         source.backup(target)
         check = target.execute("PRAGMA quick_check").fetchone()
         if check is None or str(check[0]).casefold() != "ok":
             raise RestoreVerificationError("恢复后的数据库完整性检查失败。")
         target.commit()
+        target.close()
+        target = None
+        if target_path.exists():
+            os.chmod(temporary_path, target_path.stat().st_mode & 0o777)
+        else:
+            os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, target_path)
+        temporary_path = None
     except (sqlite3.Error, OSError):
         if target is not None and target.in_transaction:
             target.rollback()
@@ -219,6 +274,8 @@ def _restore_user_database(source_path: Path, target_path: Path) -> None:
             target.close()
         if source is not None:
             source.close()
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _restore_failure_message(result: RestoreCommandResult) -> str:

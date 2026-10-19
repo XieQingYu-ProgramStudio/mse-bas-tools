@@ -54,12 +54,20 @@ class AutoStartManager:
     def enable(self) -> Path:
         if self.availability_error is not None or self.application_path is None:
             raise AutoStartError(self.availability_error or "当前环境不支持自动启动。")
-        executable = next(
-            self.application_path.joinpath("Contents/MacOS").iterdir(),
-            None,
+        info_path = self.application_path / "Contents/Info.plist"
+        try:
+            with info_path.open("rb") as file_handle:
+                info = plistlib.load(file_handle)
+        except (OSError, plistlib.InvalidFileException) as exc:
+            raise AutoStartError("无法读取应用包的 Info.plist。") from exc
+        executable_name = (
+            info.get("CFBundleExecutable") if isinstance(info, dict) else None
         )
-        if executable is None:
-            raise AutoStartError("应用包中没有可执行文件。")
+        if not isinstance(executable_name, str) or not executable_name.strip():
+            raise AutoStartError("应用包未声明 CFBundleExecutable。")
+        executable = self.application_path / "Contents/MacOS" / executable_name
+        if not executable.is_file():
+            raise AutoStartError(f"应用主程序不存在：{executable}")
         payload = {
             "Label": LAUNCH_AGENT_LABEL,
             "ProgramArguments": [str(executable)],

@@ -468,8 +468,10 @@ class MainWindow(QMainWindow):
             visible=self.isVisible(),
             minimized=self.isMinimized(),
         )
+        self.scan_page.shutdown()
         self.batch_page.shutdown()
         self.dynamic_page.shutdown()
+        self.theme_page.shutdown()
         super().closeEvent(event)
         self.window_closed.emit()
 

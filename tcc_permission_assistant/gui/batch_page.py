@@ -44,6 +44,7 @@ from tcc_permission_assistant.core.tcc_db import TCCDatabase
 from tcc_permission_assistant.gui.app_inventory import AppInventoryWorker
 from tcc_permission_assistant.gui.components import (
     DangerousConfirmationDialog,
+    TaskThread,
     action_button,
     page_header,
     panel,
@@ -53,7 +54,7 @@ from tcc_permission_assistant.gui.components import (
 )
 from tcc_permission_assistant.gui.tcc_state import (
     STATUS_LABELS,
-    permission_statuses,
+    permission_statuses_for_clients,
 )
 
 
@@ -81,6 +82,8 @@ class BatchPage(QWidget):
         self._permission_checks: dict[TCCService, QCheckBox] = {}
         self._inventory_worker: AppInventoryWorker | None = None
         self._inventory_loaded = False
+        self._batch_worker: TaskThread | None = None
+        self._pending_batch: tuple[tuple[InjectionPlan, ...], int] | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -263,12 +266,14 @@ class BatchPage(QWidget):
 
     def shutdown(self) -> None:
         worker = self._inventory_worker
-        if worker is None or not worker.isRunning():
-            return
-        worker.requestInterruption()
-        if not worker.wait(3000):
-            worker.terminate()
-            worker.wait(1000)
+        if worker is not None and worker.isRunning():
+            worker.requestInterruption()
+            worker.wait()
+        self._inventory_worker = None
+        batch_worker = self._batch_worker
+        if batch_worker is not None and batch_worker.isRunning():
+            batch_worker.wait()
+        self._batch_worker = None
 
     def set_app_name_language(self, language: str) -> None:
         if language == self.app_name_language:
@@ -310,7 +315,7 @@ class BatchPage(QWidget):
             )
         }
         database = TCCDatabase.for_scope(TCCDatabaseScope.USER)
-        candidates: list[BatchCandidate] = []
+        matched_results: list[tuple[AppScanResult, tuple[TCCService, ...]]] = []
         for result in self.inventory:
             matched = tuple(
                 service
@@ -319,14 +324,21 @@ class BatchPage(QWidget):
             )
             if not matched:
                 continue
-            try:
-                statuses = permission_statuses(
-                    result.bundle_id,
-                    matched,
-                    database=database,
-                )
-            except Exception:
-                statuses = {service: PermissionStatus.UNKNOWN for service in matched}
+            matched_results.append((result, matched))
+        try:
+            statuses_by_bundle = permission_statuses_for_clients(
+                [result.bundle_id for result, _matched in matched_results],
+                selected,
+                database=database,
+            )
+        except Exception:
+            statuses_by_bundle = {}
+        candidates: list[BatchCandidate] = []
+        for result, matched in matched_results:
+            statuses = statuses_by_bundle.get(
+                result.bundle_id,
+                {service: PermissionStatus.UNKNOWN for service in matched},
+            )
             candidates.append(
                 BatchCandidate(
                     result=result,
@@ -486,25 +498,39 @@ class BatchPage(QWidget):
             applications_closed=dialog.applications_closed,
             phrase=dialog.entered_phrase,
         )
-        try:
-            result = execute_batch_injection(
+        self._pending_batch = (tuple(plans), len(self.selected_candidates()))
+        self.run_button.setEnabled(False)
+        self.run_button.setText("正在执行批量授权…")
+        worker = TaskThread(
+            lambda: execute_batch_injection(
                 plans,
                 confirmation,
                 backup_manager=BackupManager(),
-            )
-            self.audit.event(
-                "gui_batch_inject",
-                plan_count=len(plans),
-                app_count=len(self.selected_candidates()),
-                backup_path=result.backup.path,
-                rows_changed=result.rows_changed,
-                verification_count=result.verification_count,
-                success=result.success,
-            )
-        except Exception as exc:
-            show_error(self, "批量授权失败", exc)
-            self._permission_selection_changed()
+            ),
+            self,
+        )
+        worker.succeeded.connect(self._batch_succeeded)
+        worker.failed.connect(self._batch_failed)
+        worker.finished.connect(self._batch_finished)
+        self._batch_worker = worker
+        worker.start()
+
+    def _batch_succeeded(self, result: object) -> None:
+        pending = self._pending_batch
+        if pending is None:
             return
+        plans, app_count = pending
+        self.audit.event(
+            "gui_batch_inject",
+            plan_count=len(plans),
+            app_count=app_count,
+            backup_path=result.backup.path,
+            rows_changed=result.rows_changed,
+            verification_count=result.verification_count,
+            success=result.success,
+            rolled_back=result.rolled_back,
+            rollback_error=result.rollback_error,
+        )
         self._permission_selection_changed()
         if result.success:
             QMessageBox.information(
@@ -515,11 +541,33 @@ class BatchPage(QWidget):
                 "请重新打开相关应用测试。",
             )
         else:
+            rollback_text = (
+                "已自动回滚到操作前备份。"
+                if result.rolled_back
+                else (
+                    f"自动回滚失败：{result.rollback_error}"
+                    if result.rollback_error
+                    else "未执行自动回滚，请手动恢复备份。"
+                )
+            )
             QMessageBox.warning(
                 self,
                 "批量验证失败",
-                f"部分权限未通过验证。\n\n备份文件：\n{result.backup.path}",
+                f"部分权限未通过验证。\n\n{rollback_text}\n\n"
+                f"备份文件：\n{result.backup.path}",
             )
+
+    def _batch_failed(self, error: object) -> None:
+        show_error(self, "批量授权失败", error)
+        self._permission_selection_changed()
+
+    def _batch_finished(self) -> None:
+        worker = self._batch_worker
+        if worker is not None:
+            worker.deleteLater()
+        self._batch_worker = None
+        self._pending_batch = None
+        self._mode_changed(self.dry_run_checkbox.isChecked())
 
     @staticmethod
     def _plan_text(plan: InjectionPlan) -> str:

@@ -7,6 +7,7 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -23,10 +24,12 @@ from PyQt6.QtWidgets import (
 from tcc_permission_assistant.core.efi import EFIManager
 from tcc_permission_assistant.core.logger import AuditLogger
 from tcc_permission_assistant.core.opencore_theme import (
+    OPEN_CANOPY_TARGET_VERSION,
     OpenCoreThemeManager,
     ThemeBackupInfo,
 )
 from tcc_permission_assistant.gui.components import (
+    TaskThread,
     action_button,
     page_header,
     panel,
@@ -50,6 +53,8 @@ class OpenCoreThemePage(QWidget):
         self.manager = manager or OpenCoreThemeManager()
         self.efi_manager = efi_manager or EFIManager()
         self.backups: tuple[ThemeBackupInfo, ...] = ()
+        self._operation_worker: TaskThread | None = None
+        self._operation_kind = ""
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -105,6 +110,12 @@ class OpenCoreThemePage(QWidget):
         help_row.addWidget(efi_button)
         action_layout.addLayout(help_row)
 
+        self.compatibility_checkbox = QCheckBox(
+            f"已确认当前 OpenCore 与内置驱动兼容（目标 {OPEN_CANOPY_TARGET_VERSION}）"
+        )
+        self.compatibility_checkbox.toggled.connect(self._update_apply_state)
+        action_layout.addWidget(self.compatibility_checkbox)
+
         apply_row = QHBoxLayout()
         self.status_label = QLabel("请选择已挂载的 EFI/OC")
         self.status_label.setObjectName("muted")
@@ -115,6 +126,7 @@ class OpenCoreThemePage(QWidget):
             "monitor",
             role="primary",
         )
+        self.apply_button.setEnabled(False)
         self.apply_button.clicked.connect(self.apply_theme)
         apply_row.addWidget(self.apply_button)
         action_layout.addLayout(apply_row)
@@ -257,8 +269,18 @@ class OpenCoreThemePage(QWidget):
     def target_path(self) -> str:
         return self.target_combo.currentText().strip()
 
+    def _update_apply_state(self, checked: bool) -> None:
+        self.apply_button.setEnabled(checked)
+
     def apply_theme(self) -> None:
         target = self.target_path()
+        if not self.compatibility_checkbox.isChecked():
+            QMessageBox.warning(
+                self,
+                "未确认驱动兼容",
+                "请先核对当前 OpenCore 版本与内置 OpenCanopy 驱动是否兼容。",
+            )
+            return
         if not target:
             QMessageBox.warning(
                 self,
@@ -277,24 +299,81 @@ class OpenCoreThemePage(QWidget):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        try:
-            result = self.manager.install(target)
-        except Exception as exc:
-            show_error(self, "应用 OpenCore 主题失败", exc)
+        self._start_operation(
+            "apply",
+            lambda: self.manager.install(
+                target,
+                compatibility_confirmed=True,
+            ),
+        )
+
+    def _start_operation(self, kind: str, task) -> None:
+        if self._operation_worker is not None:
+            return
+        self._operation_kind = kind
+        self.apply_button.setEnabled(False)
+        self.restore_button.setEnabled(False)
+        self.compatibility_checkbox.setEnabled(False)
+        self.status_label.setText(
+            "正在应用主题，请勿拔出 EFI…"
+            if kind == "apply"
+            else "正在还原主题，请勿拔出 EFI…"
+        )
+        worker = TaskThread(task, self)
+        worker.succeeded.connect(self._operation_succeeded)
+        worker.failed.connect(self._operation_failed)
+        worker.finished.connect(self._operation_finished)
+        self._operation_worker = worker
+        worker.start()
+
+    def _operation_succeeded(self, result: object) -> None:
+        if self._operation_kind == "apply":
+            self.audit.event(
+                "apply_opencore_theme",
+                oc_directory=str(result.config_path.parent),
+                backup_path=result.backup.path,
+            )
+            self.status_label.setText("主题已应用，重新启动后可进入 OpenCanopy。")
             self.refresh_backups()
+            QMessageBox.information(
+                self,
+                "主题已应用",
+                f"主题目录：{result.theme_target}\n\n备份目录：{result.backup.path}",
+            )
             return
         self.audit.event(
-            "apply_opencore_theme",
-            oc_directory=str(result.config_path.parent),
-            backup_path=result.backup.path,
+            "restore_opencore_theme",
+            oc_directory=str(result.oc_directory),
+            restored_backup=result.restored_backup.path,
+            pre_restore_backup=result.pre_restore_backup.path,
         )
-        self.status_label.setText("主题已应用，重新启动后可进入 OpenCanopy。")
+        self.status_label.setText("主题备份已还原。")
         self.refresh_backups()
         QMessageBox.information(
             self,
-            "主题已应用",
-            f"主题目录：{result.theme_target}\n\n备份目录：{result.backup.path}",
+            "主题已还原",
+            f"已恢复：{result.restored_backup.path}\n\n"
+            f"还原前备份：{result.pre_restore_backup.path}",
         )
+
+    def _operation_failed(self, error: object) -> None:
+        title = (
+            "应用 OpenCore 主题失败"
+            if self._operation_kind == "apply"
+            else "还原 OpenCore 主题失败"
+        )
+        show_error(self, title, error)
+        self.status_label.setText(str(error))
+        self.refresh_backups()
+
+    def _operation_finished(self) -> None:
+        worker = self._operation_worker
+        if worker is not None:
+            worker.deleteLater()
+        self._operation_worker = None
+        self.compatibility_checkbox.setEnabled(True)
+        self._update_apply_state(self.compatibility_checkbox.isChecked())
+        self._backup_selection_changed()
 
     def selected_backup(self) -> ThemeBackupInfo | None:
         rows = self.backup_table.selectionModel().selectedRows()
@@ -326,29 +405,19 @@ class OpenCoreThemePage(QWidget):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        try:
-            result = self.manager.restore(
+        self._start_operation(
+            "restore",
+            lambda: self.manager.restore(
                 backup.path,
                 oc_directory=target or None,
-            )
-        except Exception as exc:
-            show_error(self, "还原 OpenCore 主题失败", exc)
-            self.refresh_backups()
-            return
-        self.audit.event(
-            "restore_opencore_theme",
-            oc_directory=str(result.oc_directory),
-            restored_backup=result.restored_backup.path,
-            pre_restore_backup=result.pre_restore_backup.path,
+            ),
         )
-        self.status_label.setText("主题备份已还原。")
-        self.refresh_backups()
-        QMessageBox.information(
-            self,
-            "主题已还原",
-            f"已恢复：{result.restored_backup.path}\n\n"
-            f"还原前备份：{result.pre_restore_backup.path}",
-        )
+
+    def shutdown(self) -> None:
+        worker = self._operation_worker
+        if worker is not None and worker.isRunning():
+            worker.wait()
+        self._operation_worker = None
 
     def _load_preview(self) -> None:
         image_path = self.manager.theme_source / "Background.png"

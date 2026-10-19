@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import plistlib
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,6 +20,7 @@ from tcc_permission_assistant.core.errors import TCCAssistantError
 
 PLUTIL = "/usr/bin/plutil"
 THEME_VARIANT = r"XieQingyu\Studio"
+OPEN_CANOPY_TARGET_VERSION = "1.0.9"
 MANIFEST_NAME = "theme-manifest.json"
 THEME_DIRECTORY_NAME = "XieQingyu/Studio"
 
@@ -109,6 +112,7 @@ class OpenCoreThemeManager:
         theme_root: str | Path | None = None,
         backup_root: str | Path | None = None,
         runner: ThemeCommandRunner | None = None,
+        retention: int = 30,
     ) -> None:
         self.theme_root = (
             Path(theme_root).expanduser().resolve()
@@ -120,6 +124,7 @@ class OpenCoreThemeManager:
             / "OpenCore"
         )
         self.runner = runner or SubprocessThemeRunner()
+        self.retention = max(1, retention)
 
     @property
     def theme_source(self) -> Path:
@@ -133,7 +138,17 @@ class OpenCoreThemeManager:
     def driver_source(self) -> Path:
         return self.theme_root / "OpenCanopy.efi"
 
-    def install(self, oc_directory: str | Path) -> ThemeInstallResult:
+    def install(
+        self,
+        oc_directory: str | Path,
+        *,
+        compatibility_confirmed: bool = False,
+    ) -> ThemeInstallResult:
+        if not compatibility_confirmed:
+            raise OpenCoreThemeError(
+                "应用前必须确认当前 OpenCore 与内置 OpenCanopy 驱动兼容"
+                f"（目标版本 {OPEN_CANOPY_TARGET_VERSION}）。"
+            )
         oc_directory = self._validate_oc_directory(oc_directory)
         self._validate_theme_assets()
         backup = self._create_backup(oc_directory, "XieQingyuStudio")
@@ -145,7 +160,7 @@ class OpenCoreThemeManager:
             self._replace_tree(self.theme_source, theme_target)
             self._copy_tree_over(self.label_source, oc_directory / "Resources/Label")
             driver_target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(self.driver_source, driver_target)
+            self._atomic_copy_file(self.driver_source, driver_target)
             self._rewrite_config(config_path)
             self._lint(config_path)
         except Exception as exc:
@@ -153,6 +168,7 @@ class OpenCoreThemeManager:
             if isinstance(exc, OpenCoreThemeError):
                 raise
             raise OpenCoreThemeError(f"应用主题失败，已自动回滚：{exc}") from exc
+        self._prune_backups()
         return ThemeInstallResult(
             backup=backup_info,
             config_path=config_path,
@@ -192,6 +208,7 @@ class OpenCoreThemeManager:
             if isinstance(exc, OpenCoreThemeError):
                 raise
             raise OpenCoreThemeError(f"还原主题失败，已自动回滚：{exc}") from exc
+        self._prune_backups()
         return ThemeRestoreResult(
             restored_backup=backup_info,
             pre_restore_backup=self._backup_info(pre_restore),
@@ -293,7 +310,7 @@ class OpenCoreThemeManager:
         backup_config = backup / "config.plist"
         if not backup_config.is_file():
             raise OpenCoreThemeError("主题备份缺少 config.plist。")
-        shutil.copy2(backup_config, oc_directory / "config.plist")
+        self._atomic_copy_file(backup_config, oc_directory / "config.plist")
         backup_label = backup / "Label"
         if backup_label.is_dir():
             self._copy_tree_over(backup_label, oc_directory / "Resources/Label")
@@ -309,7 +326,7 @@ class OpenCoreThemeManager:
         backup_driver = backup / "OpenCanopy.efi"
         if backup_driver.is_file():
             driver_target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(backup_driver, driver_target)
+            self._atomic_copy_file(backup_driver, driver_target)
         else:
             driver_target.unlink(missing_ok=True)
 
@@ -347,8 +364,10 @@ class OpenCoreThemeManager:
             )
         else:
             open_canopy["Enabled"] = True
-        with config_path.open("wb") as file_handle:
-            plistlib.dump(config, file_handle, sort_keys=False)
+        self._atomic_write_bytes(
+            config_path,
+            plistlib.dumps(config, sort_keys=False),
+        )
 
     def _lint(self, config_path: Path) -> None:
         result = self.runner.run([PLUTIL, "-lint", str(config_path)])
@@ -399,6 +418,24 @@ class OpenCoreThemeManager:
             legacy=not manifest,
         )
 
+    def _prune_backups(self) -> None:
+        if not self.backup_directory.is_dir():
+            return
+        backups = sorted(
+            (
+                path
+                for path in self.backup_directory.iterdir()
+                if path.is_dir() and (path / "config.plist").is_file()
+            ),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for path in backups[self.retention :]:
+            try:
+                shutil.rmtree(path)
+            except OSError:
+                continue
+
     @staticmethod
     def _copy_tree_over(source: Path, target: Path) -> None:
         target.mkdir(parents=True, exist_ok=True)
@@ -423,3 +460,45 @@ class OpenCoreThemeManager:
             raise OpenCoreThemeError("拒绝删除 EFI/OC 目录之外的路径。")
         if resolved_target.exists():
             shutil.rmtree(resolved_target)
+
+    def _atomic_copy_file(self, source: Path, target: Path) -> None:
+        try:
+            self._atomic_write_bytes(target, source.read_bytes())
+        except OSError as exc:
+            raise OpenCoreThemeError(f"无法原子写入 {target}：{exc}") from exc
+
+    @staticmethod
+    def _atomic_write_bytes(target: Path, data: bytes) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        mode = 0o644
+        if target.exists():
+            try:
+                mode = target.stat().st_mode & 0o777
+            except OSError:
+                pass
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=target.parent,
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as file_handle:
+                file_handle.write(data)
+                file_handle.flush()
+                os.fsync(file_handle.fileno())
+            try:
+                os.chmod(temporary, mode)
+            except OSError:
+                pass
+            os.replace(temporary, target)
+            directory_fd = os.open(target.parent, os.O_RDONLY)
+            try:
+                try:
+                    os.fsync(directory_fd)
+                except OSError:
+                    pass
+            finally:
+                os.close(directory_fd)
+        finally:
+            temporary.unlink(missing_ok=True)

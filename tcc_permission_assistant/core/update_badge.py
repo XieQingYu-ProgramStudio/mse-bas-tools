@@ -133,12 +133,14 @@ class UpdateBadgeManager:
         *,
         backup_root: str | Path | None = None,
         runner: PreferenceCommandRunner | None = None,
+        retention: int = 50,
     ) -> None:
         self.preference_path = Path(preference_path).expanduser().absolute()
         self.backup_directory = (
             Path(backup_root or default_backup_root()) / "systempreferences"
         )
         self.runner = runner or SubprocessPreferenceRunner()
+        self.retention = max(1, retention)
 
     def read(self) -> BadgeSnapshot:
         preferences = self._read_preferences()
@@ -318,6 +320,7 @@ class UpdateBadgeManager:
             )
             with os.fdopen(descriptor, "wb") as file_handle:
                 file_handle.write(data)
+            self._prune_backups()
             return PreferenceBackup(
                 path=path,
                 source_path=self.preference_path,
@@ -325,6 +328,13 @@ class UpdateBadgeManager:
                 sha256=hashlib.sha256(data).hexdigest(),
             )
         raise UpdateBadgeError("无法创建唯一的红点偏好备份。")
+
+    def _prune_backups(self) -> None:
+        for path in self.list_backups()[self.retention :]:
+            try:
+                path.unlink()
+            except OSError:
+                continue
 
     def _restart_settings_ui(self) -> None:
         self.runner.run(["/usr/bin/killall", "System Settings"])
