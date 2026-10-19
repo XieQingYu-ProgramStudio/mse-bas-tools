@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yuexing-bas-toolbox"
-version = "1.0.0"
+version = "1.1.0"
 description = "月星BAS工具箱：macOS TCC 权限诊断、动态授权与恢复"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,7 +15,6 @@ dependencies = []
 
 [project.optional-dependencies]
 gui = ["PyQt6>=6.7,<7"]
-test = ["pytest>=8.2,<9"]
 
 [project.scripts]
 yuexing-bas = "tcc_permission_assistant.cli:main"
@@ -33,11 +32,6 @@ tcc_permission_assistant = [
   "gui/icons/LICENSE",
   "gui/assets/*.png",
 ]
-
-[tool.pytest.ini_options]
-addopts = "-q"
-pythonpath = ["."]
-testpaths = ["tests"]
 
 [tool.ruff.lint.per-file-ignores]
 "tcc_permission_assistant/gui/*.py" = ["BLE001"]

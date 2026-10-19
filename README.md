@@ -1,4 +1,4 @@
-# 月星BAS工具箱 1.0.0
+# 月星BAS工具箱 1.1.0
 
 月星BAS工具箱是一款面向 macOS 15 与 OpenCore 环境的本地权限和系统维护工具。
 图形界面使用 PyQt6，权限扫描、数据库写入、备份和诊断保留完整的本地审计记录。
@@ -21,7 +21,7 @@
 
 - 读取并清理 System Settings 更新红点，不阻断系统安全更新。
 - 列出 EFI 分区，经用户确认和管理员授权后挂载或卸载。
-- 提供谢清宇工作室 OpenCore 主题及安装、恢复脚本。
+- 在图形界面应用或还原谢清宇工作室 OpenCore 主题，支持自动备份与回滚。
 
 ## 系统要求
 
@@ -51,7 +51,7 @@ dist/月星BAS工具箱.app
 安装镜像位于：
 
 ```text
-dist/月星BAS工具箱-1.0.0.dmg
+dist/月星BAS工具箱-1.1.0.dmg
 ```
 
 将应用拖入“应用程序”后再启用登录启动。直接从 DMG 挂载卷运行时，登录启动
@@ -82,7 +82,8 @@ python -m tcc_permission_assistant.app
 │   └── 日志
 ├── 系统维护
 │   ├── 更新提示
-│   └── EFI 分区
+│   ├── EFI 分区
+│   └── OC 主题
 └── 设置
 ```
 
@@ -164,15 +165,22 @@ EFI 分区通过 `diskutil list -plist physical` 只读识别。挂载或卸载�
 
 ### OpenCore 主题
 
-项目提供谢清宇工作室 OpenCanopy 主题：
+“系统维护 → OC 主题”提供谢清宇工作室 OpenCanopy 主题：
 
 - 3840×2160 与 5120×2880 品牌背景；
 - 27 个统一风格启动图标；
 - 13 组中文启动标签；
-- OpenCore 1.0.9 安装说明，OpenCanopy 驱动由用户从官方发行包获取；
-- 自动备份和安装脚本。
+- 自动发现已挂载的 `EFI/OC`，也支持手动选择目录；
+- 应用前备份配置、标签、原主题和 OpenCanopy 驱动；
+- 应用后执行 `plutil -lint`，失败时自动回滚；
+- 从备份列表还原，并在还原前保存当前状态。
+
+开源源码不附带 `OpenCanopy.efi`。首次应用前需从 OpenCore 官方发行包获取匹配
+版本并放入 `oc_theme/OpenCanopy.efi`。
 
 ![OpenCore 主题](docs/screenshots/oc-theme.png)
+
+![OpenCore 主题管理](docs/screenshots/oc-theme-manager.png)
 
 详细说明见 [oc_theme/README.md](oc_theme/README.md)。
 
@@ -285,25 +293,6 @@ yuexing-bas restore --file "/path/to/TCC-user-xxxx.bak" --execute
 
 ![关于界面](docs/screenshots/about.png)
 
-## 测试
-
-```bash
-.venv/bin/python -m pytest
-uvx ruff check . --exclude .venv
-uvx ruff format --check . --exclude .venv
-```
-
-测试覆盖：
-
-- 权限声明、Entitlement 和固定 service 白名单；
-- Info.plist、签名和本地化名称解析；
-- 中文应用名与 Spotlight 名称解析；
-- TCC schema、只读查询和参数化 SQL；
-- UPDATE、INSERT、DELETE、事务回滚与回读验证；
-- GUI 动态开关、无弹窗写入、删除和自动备份；
-- 批量授权、恢复、诊断、日志和系统维护；
-- 设置、登录启动、红点清理、EFI 和 DMG 打包。
-
 ## macOS 打包
 
 ```bash
@@ -314,7 +303,7 @@ uvx ruff format --check . --exclude .venv
 
 ```text
 dist/月星BAS工具箱.app
-dist/月星BAS工具箱-1.0.0.dmg
+dist/月星BAS工具箱-1.1.0.dmg
 ```
 
 `.app` 包含 Python 3.11、PyQt6、Qt 依赖、应用图标和工作室 Logo。构建脚本会
@@ -323,9 +312,13 @@ dist/月星BAS工具箱-1.0.0.dmg
 未使用 Apple Developer ID 时无法完成 Apple 公证，Gatekeeper 首次启动可能提示
 来源未知。可在 Finder 中右键应用选择“打开”。
 
+## 更新日志
+
+完整版本记录见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 安全边界
 
-- 不修改 OpenCore `config.plist`、SIP、AMFI 或更新策略。
+- 仅在用户确认后修改 OpenCore `config.plist`，并先备份、校验和自动回滚。
 - 不提供任意 TCC service 名称。
 - 不调用 shell，所有子进程使用参数列表。
 - 扫描、生成和诊断默认只读。

@@ -49,6 +49,7 @@ echo "使用 PyInstaller 打包 $VERSION"
   --paths "$ROOT" \
   --add-data "$ROOT/tcc_permission_assistant/gui/icons:tcc_permission_assistant/gui/icons" \
   --add-data "$ROOT/tcc_permission_assistant/gui/assets:tcc_permission_assistant/gui/assets" \
+  --add-data "$ROOT/oc_theme:oc_theme" \
   --distpath "$PYI_DIST" \
   --workpath "$BUILD_DIR/pyinstaller" \
   --specpath "$BUILD_DIR" \
