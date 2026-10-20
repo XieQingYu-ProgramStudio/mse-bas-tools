@@ -224,7 +224,54 @@ def execute_batch_injection(
         raise InjectionConfirmationRequired(
             f"必须输入 {CONFIRMATION_PHRASE} 才能执行写入。"
         )
+    database_path, validated_plans = _validate_batch_plans(plans)
+    manager = backup_manager or BackupManager()
+    backup = manager.create_backup(database_path, TCCDatabaseScope.USER)
+    rows_changed = _execute_batch_write(validated_plans, backup.path)
+    verifications, rolled_back, rollback_error = _verify_and_rollback(
+        validated_plans,
+        backup.path,
+    )
+    return BatchInjectionResult(
+        plans=validated_plans,
+        backup=backup,
+        rows_changed=rows_changed,
+        verifications=verifications,
+        rolled_back=rolled_back,
+        rollback_error=rollback_error,
+    )
 
+
+def execute_dynamic_batch_injection(
+    plans: tuple[InjectionPlan, ...] | list[InjectionPlan],
+    *,
+    backup_manager: BackupManager | None = None,
+) -> BatchInjectionResult:
+    """Execute a GUI-initiated batch immediately with backup and rollback."""
+
+    database_path, validated_plans = _validate_batch_plans(plans)
+    manager = backup_manager or BackupManager()
+    backup = manager.create_backup(database_path, TCCDatabaseScope.USER)
+    rows_changed = _execute_batch_write(validated_plans, backup.path)
+    verifications, rolled_back, rollback_error = _verify_and_rollback(
+        validated_plans,
+        backup.path,
+    )
+    return BatchInjectionResult(
+        plans=validated_plans,
+        backup=backup,
+        rows_changed=rows_changed,
+        verifications=verifications,
+        rolled_back=rolled_back,
+        rollback_error=rollback_error,
+    )
+
+
+def _validate_batch_plans(
+    plans: tuple[InjectionPlan, ...] | list[InjectionPlan],
+) -> tuple[Path, tuple[InjectionPlan, ...]]:
+    if not plans:
+        raise InjectionError("批量计划为空。")
     first = plans[0]
     _ensure_user_scope(first.scope)
     database_path = first.database_path
@@ -241,21 +288,7 @@ def execute_batch_injection(
         seen.add(key)
 
     validated_plans = tuple(_validate_plan_for_execution(plan) for plan in plans)
-    manager = backup_manager or BackupManager()
-    backup = manager.create_backup(database_path, TCCDatabaseScope.USER)
-    rows_changed = _execute_batch_write(validated_plans, backup.path)
-    verifications, rolled_back, rollback_error = _verify_and_rollback(
-        validated_plans,
-        backup.path,
-    )
-    return BatchInjectionResult(
-        plans=validated_plans,
-        backup=backup,
-        rows_changed=rows_changed,
-        verifications=verifications,
-        rolled_back=rolled_back,
-        rollback_error=rollback_error,
-    )
+    return database_path, validated_plans
 
 
 def _execute_write(plan: InjectionPlan, backup_path: Path) -> int:

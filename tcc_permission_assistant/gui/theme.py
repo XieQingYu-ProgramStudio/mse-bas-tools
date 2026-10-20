@@ -106,6 +106,20 @@ QProgressBar#splashProgress::chunk {{
     background: {COLORS["accent"]};
     border-radius: 2px;
 }}
+QProgressBar#levelMeter {{
+    background: #E5ECEE;
+    border: 1px solid {COLORS["line"]};
+    border-radius: 5px;
+    min-height: 22px;
+    text-align: center;
+    color: {COLORS["ink"]};
+    font-size: 11px;
+    font-weight: 600;
+}}
+QProgressBar#levelMeter::chunk {{
+    background: {COLORS["success"]};
+    border-radius: 4px;
+}}
 QWidget#contentRoot {{
     background: {COLORS["canvas"]};
 }}

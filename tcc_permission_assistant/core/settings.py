@@ -29,6 +29,7 @@ class SettingsData:
     application_name_language: str = LANGUAGE_SYSTEM
     auto_clear_update_badges: bool = False
     launch_at_login: bool = False
+    prepare_hardware_permissions_at_launch: bool = True
 
 
 class AppSettings:
@@ -50,6 +51,10 @@ class AppSettings:
     def launch_at_login(self) -> bool:
         return self.data.launch_at_login
 
+    @property
+    def prepare_hardware_permissions_at_launch(self) -> bool:
+        return self.data.prepare_hardware_permissions_at_launch
+
     def set_application_name_language(self, language: str) -> None:
         if language not in SUPPORTED_APP_NAME_LANGUAGES:
             raise ValueError(f"不支持的应用名称语言：{language}")
@@ -62,6 +67,7 @@ class AppSettings:
         application_name_language: str,
         auto_clear_update_badges: bool,
         launch_at_login: bool,
+        prepare_hardware_permissions_at_launch: bool = True,
     ) -> None:
         if application_name_language not in SUPPORTED_APP_NAME_LANGUAGES:
             raise ValueError(f"不支持的应用名称语言：{application_name_language}")
@@ -69,6 +75,9 @@ class AppSettings:
             application_name_language=application_name_language,
             auto_clear_update_badges=bool(auto_clear_update_badges),
             launch_at_login=bool(launch_at_login),
+            prepare_hardware_permissions_at_launch=bool(
+                prepare_hardware_permissions_at_launch
+            ),
         )
         self.save()
 
@@ -105,6 +114,10 @@ class AppSettings:
             language = LANGUAGE_SYSTEM
         auto_clear = payload.get("auto_clear_update_badges", False)
         launch_at_login = payload.get("launch_at_login", False)
+        prepare_hardware_permissions = payload.get(
+            "prepare_hardware_permissions_at_launch",
+            True,
+        )
         return SettingsData(
             application_name_language=language,
             auto_clear_update_badges=(
@@ -112,5 +125,10 @@ class AppSettings:
             ),
             launch_at_login=(
                 launch_at_login if isinstance(launch_at_login, bool) else False
+            ),
+            prepare_hardware_permissions_at_launch=(
+                prepare_hardware_permissions
+                if isinstance(prepare_hardware_permissions, bool)
+                else True
             ),
         )

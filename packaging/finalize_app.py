@@ -32,6 +32,9 @@ def main() -> None:
             "CFBundleIconFile": "AppIcon.icns",
             "LSApplicationCategoryType": "public.app-category.utilities",
             "LSMinimumSystemVersion": "15.0",
+            "NSCameraUsageDescription": "用于在系统测试中预览摄像头画面。",
+            "NSCameraUseContinuityCameraDeviceType": True,
+            "NSMicrophoneUsageDescription": "用于在系统测试中检测麦克风输入电平。",
             "NSHighResolutionCapable": True,
             "NSHumanReadableCopyright": "谢清宇工作室",
         }

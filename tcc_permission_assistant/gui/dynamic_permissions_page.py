@@ -284,7 +284,7 @@ class DynamicPermissionsPage(QWidget):
         self._inventory_loaded = True
         self.inventory_status.setText(
             f"已扫描 {len(self.inventory)} 个应用"
-            + (f"，{len(errors)} 个读取失败" if errors else "")
+            + (f"，{len(errors)} 个跳过或失败" if errors else "")
         )
         self._populate_app_list()
 

@@ -119,6 +119,13 @@ class SettingsPage(QWidget):
         self.autostart_status.setObjectName("muted")
         self.autostart_status.setWordWrap(True)
         automation_layout.addWidget(self.autostart_status)
+        self.prepare_permissions_checkbox = QCheckBox(
+            "启动时自动写入本软件摄像头和麦克风权限"
+        )
+        self.prepare_permissions_checkbox.setToolTip(
+            "适用于无法弹出原生 TCC 授权的黑苹果环境；只写入本软件自身权限。"
+        )
+        automation_layout.addWidget(self.prepare_permissions_checkbox)
         root.addWidget(automation_panel)
 
         boundary = QFrame()
@@ -144,6 +151,9 @@ class SettingsPage(QWidget):
         autostart_available = self.autostart.availability_error is None
         autostart_enabled = self.autostart.is_enabled
         self.autostart_checkbox.setChecked(autostart_enabled)
+        self.prepare_permissions_checkbox.setChecked(
+            self.settings.prepare_hardware_permissions_at_launch
+        )
         self.autostart_checkbox.setEnabled(autostart_available or autostart_enabled)
         self.autostart_status.setText(
             self.autostart.availability_error
@@ -177,6 +187,9 @@ class SettingsPage(QWidget):
                 application_name_language=language,
                 auto_clear_update_badges=(self.auto_clear_checkbox.isChecked()),
                 launch_at_login=launch_at_login,
+                prepare_hardware_permissions_at_launch=(
+                    self.prepare_permissions_checkbox.isChecked()
+                ),
             )
         except (AutoStartError, OSError, ValueError) as exc:
             QMessageBox.critical(self, "保存设置失败", str(exc))
@@ -186,6 +199,9 @@ class SettingsPage(QWidget):
             application_name_language=language,
             auto_clear_update_badges=(self.settings.auto_clear_update_badges),
             launch_at_login=self.settings.launch_at_login,
+            prepare_hardware_permissions_at_launch=(
+                self.settings.prepare_hardware_permissions_at_launch
+            ),
             previous=previous,
         )
         if language != previous:

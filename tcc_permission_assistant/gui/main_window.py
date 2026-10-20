@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
@@ -28,6 +30,7 @@ from tcc_permission_assistant.branding import (
     PERMISSION_MODULE_DESCRIPTION,
     PERMISSION_MODULE_NAME,
     SYSTEM_MODULE_NAME,
+    SYSTEM_TEST_PAGE_NAME,
     UPDATE_BADGE_PAGE_NAME,
 )
 from tcc_permission_assistant.core.diagnostics import (
@@ -54,6 +57,7 @@ from tcc_permission_assistant.gui.opencore_theme_page import OpenCoreThemePage
 from tcc_permission_assistant.gui.restore_page import RestorePage
 from tcc_permission_assistant.gui.scan_page import ScanPage
 from tcc_permission_assistant.gui.settings_page import SettingsPage
+from tcc_permission_assistant.gui.system_test_page import SystemTestPage
 from tcc_permission_assistant.gui.theme import COLORS
 from tcc_permission_assistant.gui.update_badge_page import UpdateBadgePage
 
@@ -70,6 +74,7 @@ SYSTEM_NAVIGATION_ITEMS = (
     (UPDATE_BADGE_PAGE_NAME, "bell-dot"),
     (EFI_PAGE_NAME, "hard-drive"),
     (OC_THEME_PAGE_NAME, "monitor"),
+    (SYSTEM_TEST_PAGE_NAME, "camera"),
 )
 
 
@@ -119,6 +124,7 @@ class MainWindow(QMainWindow):
         self.update_badge_page = UpdateBadgePage(audit, self.badge_manager)
         self.efi_page = EFIPage(audit)
         self.theme_page = OpenCoreThemePage(audit)
+        self.system_test_page = SystemTestPage(audit)
         self.settings_page = SettingsPage(self.settings, audit)
         self._build_ui()
         self._build_menu()
@@ -128,6 +134,10 @@ class MainWindow(QMainWindow):
         self._badge_clear_timer.timeout.connect(self._auto_clear_update_badges)
         self._auto_clear_running = False
         self._configure_auto_clear()
+        QTimer.singleShot(
+            1800,
+            self._write_self_permissions_at_launch,
+        )
         QTimer.singleShot(0, self._refresh_environment_status)
 
     def _build_ui(self) -> None:
@@ -336,6 +346,7 @@ class MainWindow(QMainWindow):
             self.update_badge_page,
             self.efi_page,
             self.theme_page,
+            self.system_test_page,
             self.settings_page,
         ):
             self.stack.addWidget(page)
@@ -371,6 +382,9 @@ class MainWindow(QMainWindow):
         self.scan_page.open_dynamic_permissions_requested.connect(lambda: self.go_to(2))
         self.dynamic_page.environment_changed.connect(self._refresh_environment_status)
         self.theme_page.open_efi_page_requested.connect(lambda: self.go_to(7))
+        self.system_test_page.environment_changed.connect(
+            self._refresh_environment_status
+        )
         self.restore_page.environment_changed.connect(self._refresh_environment_status)
         self.diagnostics_page.environment_updated.connect(self._apply_diagnostic_status)
         self.settings_page.application_name_language_changed.connect(
@@ -388,6 +402,13 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1200, self._auto_clear_update_badges)
         else:
             self._badge_clear_timer.stop()
+
+    def _write_self_permissions_at_launch(self) -> None:
+        if (
+            getattr(sys, "frozen", False)
+            and self.settings.prepare_hardware_permissions_at_launch
+        ):
+            self.system_test_page.prepare_system_permissions()
 
     def _auto_clear_update_badges(self) -> None:
         if not self.settings.auto_clear_update_badges or self._auto_clear_running:
@@ -472,6 +493,7 @@ class MainWindow(QMainWindow):
         self.batch_page.shutdown()
         self.dynamic_page.shutdown()
         self.theme_page.shutdown()
+        self.system_test_page.shutdown()
         super().closeEvent(event)
         self.window_closed.emit()
 
